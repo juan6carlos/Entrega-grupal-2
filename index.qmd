@@ -1,0 +1,1469 @@
+---
+title: "Entrega grupal"
+subtitle: "Análisis de las elecciones al congreso de España"
+author: "Lidia (70833821-P), Mª del Carmen (70958487-Z), 
+Guillermo (53766427-V), Juan Carlos (31875241-R), 
+Sonia (Z2163911F), Cristobal (20263583-P)"
+title-slide-attributes:
+  data-background-video: "software.mp4"
+  data-background-size: center
+  data-background-video-loop: true
+format:
+  revealjs:
+   slide-number: true 
+   footer: "Bioestadística UCM"
+   theme: [default, style.scss]
+   embed-resources: true
+editor: visual
+---
+
+## Paquetes
+
+```{r}
+#| echo: true
+rm(list = ls())
+library(tidyverse)
+library(readr)
+library(forcats)
+library(lubridate)
+library(glue)
+library(sf)
+library(ggrepel)
+library(plotly)
+library(Cairo)
+library(ggparliament)
+
+```
+
+## Bases de datos
+
+Las bases de datos empleadas para el análisis:
+
+::: columns
+::: incremental
+-   [**datos_elecciones_brutos**]{.red} : archivo con las elecciones al congreso desde marzo de 2008 a noviembre de 2019
+-   [**cos_mun**]{.red} : archivo con los códigos y nombres de cada municipio
+-   [**historical_surveys**]{.red} : encuestas electorales desde 1982
+-   [**siglas**]{.red} : siglas y nombre de cada partido
+-   [**Municipios.geojson**]{.red} : mapa de municipios de España
+-   [**georef-spain-provincia.geojson**]{.red} : mapa de provincias de España
+:::
+:::
+
+```{r}
+election_data <- read_csv(file = "./data/datos_elecciones_brutos.csv")
+cod_mun <- read_csv(file = "./data/cod_mun.csv")
+surveys <- read_csv(file = "./data/historical_surveys.csv")
+abbrev <- read_csv(file = "./data/siglas.csv")
+mapa <- read_sf("./data/Municipios.geojson")
+prov <- read_sf("./data/georef-spain-provincia.geojson")
+```
+
+## Variables {.smaller}
+
+::: panel-tabset
+### election_data
+
+::: columns
+::: {.column width="30%"}
+Base de datos de 48737 observaciones de 471 variables.
+
+-   Presenta los [votos]{.purple} que obtiene cada partido politico en cada **municipio**. Ha de ser pasado a formato tidy
+-   [NA]{.purple} no representan missing sino **0**
+-   Los [códigos]{.purple} de ccaa, provincia y municipio aparecen separados, por lo que habrá que **unirlos** para poder usarlo con cod_mun
+-   Hay [variables]{.purple} que **no aportan información** que serán eliminadas
+:::
+
+::: {.column width="70%"}
+```{r}
+knitr::kable(head(election_data)[,c("anno",	"censo", "participacion_1", "participacion_2", "votos_blancos", "votos_nulos")])
+```
+:::
+:::
+
+### cod_mun
+
+::: columns
+::: {.column width="30%"}
+Base de datos de 8135 observaciones y 2 variables.
+
+-   Los [códigos]{.purple} corresponden a: **unificación de ccaa - provincia - municipio**
+:::
+
+::: {.column width="70%"}
+```{r}
+knitr::kable(head(cod_mun)[,c("cod_mun","municipio")])
+```
+:::
+:::
+
+### surveys
+
+::: columns
+::: {.column width="30%"}
+Base de datos de 3753 observaciones y 59 variables
+
+-   Representa los [votos]{.purple} **estimados**
+:::
+
+::: {.column width="70%"}
+```{r}
+knitr::kable(head(surveys)[,c("date_elec",	"size", "PSOE", "PP")])
+```
+:::
+:::
+
+### abbrev
+
+::: columns
+::: {.column width="30%"}
+Base de datos de 587 observaciones y 2 variables.
+
+-   Refleja los **partidos politicos y sus siglas**
+-   Algunos se solapan entre sí y hay que **filtrarlos**
+:::
+
+::: {.column width="70%"}
+```{r}
+knitr::kable(head(abbrev)[,c("denominacion",	"siglas")])
+```
+:::
+:::
+:::
+
+# Transformación de datos
+
+## Filtro datos de las elecciones
+
+-   Se eliminan columnas que no aportan información con `select()`
+-   Utilizando `glue()` se une el código de provincia y el de municipio
+-   Finalmente se usa `unite()` para juntar las columnas en una
+
+```{r}
+#| echo: true
+#| code-line-numbers: "2|3-4|6-8"
+election_data <- election_data |> 
+  select(-c(tipo_eleccion,vuelta)) |> 
+    mutate(muni_graf = glue("{codigo_provincia}{codigo_municipio}"), 
+         prov_id = codigo_provincia,
+         .before = codigo_distrito_electoral) |> 
+  unite(col = cod_muni,
+        codigo_ccaa, codigo_provincia, codigo_municipio,
+        sep = "-") |> 
+  relocate(cod_muni, .before = codigo_distrito_electoral)
+```
+
+## join con código de municipio
+
+Se añade usando `left_join()` a la base de datos election_data los municipios de cod_mun, uniéndolos mediante `cod_muni = cod_mun`
+
+```{r}
+#| echo: true
+#| code-line-numbers: "2"
+election_data <- election_data |> 
+  left_join(cod_mun, by = c("cod_muni" = "cod_mun")) |> 
+  relocate(municipio, .after = cod_muni)
+
+```
+
+## Explorar abreviaturas
+
+Se [normalizan las siglas]{.green} de los partidos políticos. Ciertos partidos solo tienen una denominación, pero otros pueden tener hasta 5 o más.
+
+```{r}
+#| echo: true
+#| code-line-numbers: "5|11-15"
+PSOE <- abbrev |> filter(str_detect(siglas, "PSOE") | str_detect(siglas, "P.S.O.E.") ) |> 
+  pull(denominacion)
+PP <- abbrev |> filter(str_detect(siglas, "PP") & str_detect(denominacion, "POPULAR")) |> 
+  pull(denominacion)
+Cs <- abbrev |> filter(str_detect(denominacion, "CIUDADANOS-PARTIDO")) |> 
+  pull(denominacion)
+PNV <- abbrev |> filter(str_detect(denominacion, "VASCO"))|> 
+  pull(denominacion)
+BNG <- abbrev |> filter(str_detect(denominacion, "BLOQUE NACIONALISTA GALEGO")) |> 
+  pull(denominacion)
+PODEMOS <- abbrev |> filter(str_detect(denominacion, "PODEMOS") |
+                              str_detect(denominacion, "IZQUIERDA UNIDA") |
+                              str_detect(denominacion, "PODEM") |
+                              str_detect(denominacion, "EZKER BATUA")|
+                              str_detect(denominacion, "MAREA")) |> 
+  pull(denominacion)
+ERC <- abbrev |> filter(str_detect(denominacion, "ESQUERRA REPUBLICANA DE CATALUNYA")) |> 
+  pull(denominacion)
+BILDU <- abbrev |> filter(str_detect(denominacion, "SORTU") | 
+                   str_detect(denominacion, "ALKARTASUNA") |
+                   str_detect(denominacion, "ARALAR") |
+                   str_detect(denominacion, "ALTERNATIBA") |
+                   str_detect(denominacion, "BILDU")) |> 
+  pull(denominacion)
+VOX <- abbrev |> filter(str_detect(denominacion, "VOX")) |> 
+  pull(denominacion)
+```
+
+## Agrupación de los partidos
+
+-   Se realiza `pivot_longer()` para obtener una columna con todos los partidos políticos y otra con los votos que recibe cada uno en cada municipio. Se `eliminan los NA` ya que significa que no han obtenido votos.
+
+-   Se utiliza `glue()` para unir el mes y el año de las elecciones y se modifican como factor
+
+-   Con `mutate()` se agrupan los partidos políticos en sus siglas y en otros
+
+```{r}
+#| echo: true
+#| code-line-numbers: "2-5|6-8|10|24"
+election_data <- election_data |> 
+  pivot_longer(-c(anno:votos_candidaturas),
+               names_to = "partido",
+               values_to = "votos",
+               values_drop_na = TRUE) |>  #Elimino los NAs
+  mutate(eleccion = glue("{mes} - {anno}")) |> 
+  mutate(eleccion = my(eleccion)) |> 
+  mutate(eleccion = glue("{month(eleccion)} - {year(eleccion)}")) |> 
+  relocate(eleccion, .before = anno) |> 
+  mutate(eleccion = factor(eleccion,
+                           levels = c("3 - 2008",
+                                      "11 - 2011",
+                                      "12 - 2015",
+                                      "6 - 2016",
+                                      "4 - 2019",
+                                      "11 - 2019"),
+                           ordered = TRUE,
+                           labels = c("Marzo de 2008",
+                                      "Noviembre de 2011",
+                                      "Diciembre de 2015",
+                                      "Junio de 2016",
+                                      "Abril de 2019",
+                                      "Noviembre de 2019"))) |> 
+  mutate(partido_group = case_when(str_detect(partido, str_c(PSOE, collapse = "|")) ~ "PSOE",
+                                   str_detect(partido, str_c(PP, collapse = "|")) ~ "PP",
+                                   str_detect(partido, str_c(Cs, collapse = "|")) ~ "Cs",
+                                   str_detect(partido, str_c(PNV, collapse = "|")) ~ "PNV",
+                                   str_detect(partido, str_c(BNG, collapse = "|")) ~ "BNG",
+                                   str_detect(partido, str_c(PODEMOS, collapse = "|")) ~ "PODEMOS",
+                                   str_detect(partido, str_c(ERC, collapse = "|")) ~ "ERC",
+                                   str_detect(partido, str_c(BILDU, collapse = "|")) ~ "BILDU",
+                                   str_detect(partido, str_c(VOX, collapse = "|")) ~ "VOX",
+                                   TRUE ~ "Otros")) |> 
+  mutate(fecha = ym(paste(anno, mes))) |>  
+  mutate(fecha = format(fecha, "%Y-%m"))
+  
+
+
+
+
+
+```
+
+## Base de datos final {#planificacion}
+
+Finalmente se obtiene una base de datos de 396735 observaciones y 18 variables. Destacando:
+
+::: column-screen-inset-right
+::: {style="font-size:20px"}
+|   Variable    |            Descripción            |                                                     Valores                                                      |
+|:-------------------:|:------------------------:|:------------------------:|
+|   Elección    |    año y mes de las elecciones    | factor \[Marzo de 2008, Noviembre de 2011, Diciembre de 2015, Junio de 2016, Abril de 2019, Noviembre de 2019 \] |
+|    Prov_id    |   identificador de la provincia   |                                                   \[01...52\]                                                    |
+|   Municipio   |       nombre del municipio        |                                                    categórica                                                    |
+|     Censo     |     nº de habitantes censados     |                                                     discreta                                                     |
+|    Partido    | partido con mayor número de votos |                                                    categórica                                                    |
+|     Votos     |               votos               |                                                     discreta                                                     |
+| Partido_grupo | grupo al que pertenece el partido |                                                    categórica                                                    |
+:::
+:::
+
+## Filtro encuestas
+
+Se [excluyen]{.red} los datos que:
+
+-   Se refieran a **elecciones anteriores a [2008]{.green}**
+-   Sean a **pie de urna**
+-   **Tamaño muestral [desconocido]{.green} o inferior a [500]{.green}**
+-   Tengan **1 día o menos de trabajo de campo**
+
+```{r}
+#| echo: true
+#| code-line-numbers: "2|5|6|7|8"
+encuestas <- surveys |>
+  drop_na(size,field_date_from,field_date_to) |> 
+  mutate(dias_encuesta = abs(field_date_to - field_date_from)) |>
+  relocate(dias_encuesta, .after = field_date_to) |> 
+  filter(year(date_elec) >= 2008 & year(date_elec) <= 2019) |> 
+  filter(exit_poll == FALSE) |> 
+  filter(size > 500) |> 
+  filter(dias_encuesta > 1) |> 
+  select(-c(type_survey, exit_poll, field_date_from, field_date_to))
+```
+
+## Normalización de encuestas
+
+-   Se sustituyen los NA por 0 votos con `replace_na()`
+-   Se categorizan los partidos y se añade el nivel ["Otros"]{.red}
+-   Se transforma en tidydata con `pivot_longer()`
+
+```{r}
+#| echo: true
+#| code-line-numbers: "1|13-14|21-23"
+encuestas <- encuestas |> mutate(across(UCD:EV, ~ replace_na(.,0))) |> 
+  select(date_elec:turnout, where(~ is.numeric(.x) && sum(.x, na.rm = T) > 0)) |> 
+   mutate(
+    PSOE = PSOE,
+    PP = PP,
+    Cs = CS,
+    BNG = BNG,
+    ERC = ERC,
+    VOX = VOX,
+    `EAJ-PNV` = `EAJ-PNV`,
+    `EH-BILDU` = `EH-BILDU`,
+    `PODEMOS-IU` = PODEMOS + IU, 
+    Otros = AMAIUR + CC + `CC-NC` + CIU + COMPROMIS + CUP + `DIL-CDC` +
+            `JXCAT-JUNTS` + MP + `NA-SUMA` + PACMA + PDECAT + PRC + UP + UPYD) |> 
+  select(date_elec:turnout,"PSOE", "PP", "Cs", "BNG", "ERC", "VOX", "EAJ-PNV", "EH-BILDU", "PODEMOS-IU", "Otros") |>
+  rename(PNV = `EAJ-PNV`,
+         BILDU = `EH-BILDU`,
+         PODEMOS = `PODEMOS-IU`) |> 
+  select(date_elec:turnout,sort(c("PSOE", "PP", "Cs", "BNG", "ERC", "VOX", "PNV", "BILDU", "PODEMOS", "Otros"))) |>
+  relocate(Otros, .after = everything()) |>
+  pivot_longer(cols = BILDU:Otros,
+               names_to = "partido",
+               values_to = "voto_estim") |> 
+  mutate(fecha = format(date_elec, "%Y-%m"))
+```
+
+## Resumenes {.smaller}
+
+-   Resumen por [municipios]{.green}
+
+```{r}
+resumen_municipio <- election_data |> 
+  group_by(eleccion,muni_graf,municipio,censo,votos_candidaturas,partido_group) |> 
+  summarise(resultado = sum(votos)) |> 
+  ungroup()
+
+```
+
+```{r}
+knitr::kable(head(resumen_municipio, n =3)[,c("eleccion",	"municipio", "partido_group", "resultado")])
+```
+
+-   Resumen por [provincias]{.green}
+
+```{r}
+resumen_prov <- election_data |> 
+  group_by(eleccion,prov_id,partido_group) |> 
+  summarise(resultado = sum(votos)) |> 
+  ungroup(partido_group) |> 
+  summarise(partido_group = partido_group, resultado = resultado, votos_candidaturas = sum(resultado)) |> 
+  ungroup()
+```
+
+```{r}
+knitr::kable(head(resumen_prov, n =3)[,c("eleccion",	"prov_id", "partido_group", "resultado", "votos_candidaturas")])
+```
+
+-   Resumen [nacional]{.green}
+
+```{r}
+resumen_nacional <- election_data |> 
+  group_by(eleccion,partido_group) |> 
+  summarise(resultado = sum(votos)) |> 
+  ungroup()
+```
+
+```{r}
+knitr::kable(head(resumen_nacional, n =3)[,c("eleccion", "partido_group", "resultado")])
+```
+
+# 1. ¿Qué partido fue el ganador en los municipios con más de 100,000 habitantes (censo) en cada elección? {.smaller}
+
+------------------------------------------------------------------------
+
+### ¿Cuántas ciudades grandes ha ganado cada partido en las 6 elecciones?
+
+Se filtran los datos para seleccionar las ciudades con más de [100,000 habitantes censados,]{.red} lo que llamaremos ciudades grandes.
+
+```{r}
+#| echo: true
+#| code-fold: true
+ciudad_grande_eleccion <- resumen_municipio |> 
+  filter(censo > 100000) |> 
+  group_by(eleccion, municipio) |> 
+  slice_max(resultado) |> 
+  count(partido_group) |> 
+  ungroup() |> 
+  group_by(eleccion, partido_group) |> 
+  count(n, sort = TRUE, name = "frecuencia") |> 
+  ungroup() 
+ciudad_grande_eleccion <- ciudad_grande_eleccion |> mutate(partido_group = fct_reorder(partido_group, frecuencia, .desc = TRUE))
+
+ciudad_grande <- resumen_municipio |> 
+  filter(censo > 100000) |> 
+  group_by(eleccion, municipio) |> 
+  slice_max(resultado) |> 
+  count(partido_group) |> 
+  ungroup() |> 
+  group_by(partido_group) |> 
+  count(n, sort = TRUE, name = "frecuencia") |> 
+  ungroup()
+ciudad_grande <- ciudad_grande |> mutate(partido_group = fct_reorder(partido_group, frecuencia, .desc = TRUE))
+
+ciudad_grande_maximo <- resumen_municipio |> 
+  filter(censo > 100000) |> 
+  group_by(eleccion, municipio) |> 
+  slice_max(resultado) |> 
+  count(partido_group) |> 
+  ungroup() |> 
+  group_by(eleccion, partido_group) |> 
+  count(n, sort = TRUE, name = "frecuencia") |> 
+  ungroup() |> 
+  group_by(eleccion) |> 
+  slice_max(frecuencia)
+ciudad_grande_maximo <- ciudad_grande_maximo |> mutate(partido_group = fct_reorder(partido_group, frecuencia, .desc = TRUE))
+```
+
+El partido político con más ciudades grandes ganadas es el PP seguido por el PSOE.
+
+```{r}
+#| echo: true
+#| code-fold: true
+colores_partidos <- c(
+  "Cs" = "#fb5000",
+    "PODEMOS" = "#6D50B3",
+    "PP" = "#3399FF",
+    "PSOE" = "red",
+    "PNV" = "#008135",
+    "VOX" = "#73B446",
+    "BNG" = "#8dd8f8",
+    "ERC" = "#ffbf41",
+    "BILDU" = "#03cfb5",
+  "Otros" = "#462B25"
+)
+theme_set(theme_minimal(base_size = 10))
+
+
+theme_update(plot.subtitle = element_text(size = 9),
+  plot.title = element_text(face = "bold"),
+  plot.caption= element_text(size= 7),
+  legend.title = element_text(size = 7),
+  legend.text = element_text(size = 7),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  panel.background = element_rect(fill = "white", color = "grey"),
+  legend.position = "bottom")
+ciudad_grande |> ggplot(aes(x = partido_group, y = frecuencia)) +
+  geom_col(aes(fill = partido_group))+
+  geom_text(aes(label = scales::number(frecuencia)), 
+            position = position_fill(-2)) +
+  scale_fill_manual(values = colores_partidos) +
+  guides(fill = "none") +
+  labs(caption = "Pregunta 1",
+       fill = "Partido político",
+       y = "Número de ciudades",
+       x = "Partido político")
+```
+
+------------------------------------------------------------------------
+
+### ¿Cuántas ciudades grandes ha ganado cada partido en cada elección?
+
+Desde 2011 a 2019 lidera PP el voto en las ciudades grandes, pero en 2019 es superado por el PSOE.
+
+```{r}
+#| echo: true
+#| code-fold: true
+ciudad_grande_eleccion |> ggplot(aes(x = partido_group, y = frecuencia)) +
+  geom_col(aes(fill = partido_group)) +
+  geom_text(aes(label = scales::number(frecuencia)), 
+            position = position_fill(-2)) +
+  scale_fill_manual(values = colores_partidos) +
+  guides(fill = "none") +
+  labs(caption = "Pregunta 1",
+       fill = "Partido político",
+       y = "Número de ciudades",
+       x = "Partido político") +
+  facet_wrap(~eleccion) +
+  theme(axis.text.x = element_text(angle = 50, hjust = 1))
+```
+
+------------------------------------------------------------------------
+
+### ¿Qué partido ganó más ciudades grandes en cada elección?
+
+Como ya se observó en el apartado anterior el PP ganó en más ciudades grandes entre 2011 y 2019, el resto de elecciones ganó el PSOE.
+
+```{r}
+#| echo: true
+#| code-fold: true
+ciudad_grande_maximo |> ggplot(aes(x = eleccion, y = frecuencia)) +
+  geom_col(aes(fill = partido_group)) +
+  geom_text(aes(label = scales::number(frecuencia)), 
+            position = position_fill(-2)) +
+  scale_fill_manual(values = colores_partidos) +
+  #guides(fill = "none") +
+  labs(caption = "Pregunta 1",
+       fill = "Partido político",
+       y = "Número de ciudades",
+       x = "Elección") 
+```
+
+# 2. ¿Qué partido fue el segundo cuando el primero fue PSOE? ¿ y cuando el primero fue el PP? {.smaller}
+
+------------------------------------------------------------------------
+
+### Primer y segundo partido en cada elección
+
+Se resumen los resultados para seleccionar el primer y segundo puesto
+
+```{r}
+#| echo: true
+#| code-fold: true
+prim_y_seg <- resumen_nacional |> slice_max(resultado, by = eleccion, n = 2)
+
+```
+
+El **liderazgo** se encuentra normalmente entre el [PP y PSOE]{.green}, con la diferencia en 2015, donde el primer partido es PP y el segundo es [PODEMOS]{.green}.
+
+```{r}
+#| echo: true
+#| code-fold: true
+prim_y_seg |> ggplot(aes(x = eleccion, y = resultado)) +
+  geom_col(aes(fill = partido_group), position = "dodge2") +
+  scale_fill_manual(values = colores_partidos) +
+  #guides(fill = "none") +
+  labs(caption = "Pregunta 11",
+       fill = "Partido político",
+       y = "Número de votos",
+       x = "Elección")
+```
+
+# 3.¿Cómo calibrar el error de las encuestas? {.smaller}
+
+## Error de las encuestas por año de elección {.smaller}
+
+Se calcula el error como el promedio de la diferencia entre el promedio de votos según las encuestas y los votos reales, por elección y partido político.
+
+```{r}
+#| echo: true
+#| code-fold: true
+ciudad_error <- election_data |> 
+  filter(censo > 100000) |> 
+  summarise(suma = sum(votos), .by=c(fecha,partido_group)) |> 
+  mutate(prop = round(suma/(sum(suma)),2), .by=c(fecha))
+
+encuestas_error <- ciudad_error |> 
+  left_join(encuestas) |> 
+  mutate(encuestas = voto_estim/100) |>
+  ungroup() |> 
+  summarise(prom_enc = round(mean(encuestas),2), .by = c(fecha, partido_group)) |> 
+  left_join(ciudad_error) |> 
+  mutate(dif = abs(prom_enc - prop)) |> 
+  summarise(prom_dif = mean(dif, na.rm = TRUE), .by = fecha)
+
+```
+
+Se observa que las encuestas [disminuyen su error]{.red} con el paso del tiempo
+
+```{r}
+#| echo: true
+#| code-fold: true
+encuestas_error |> 
+  ggplot() +
+  geom_point(aes(x = fecha, y = prom_dif), shape = 18, size = 4, color= "purple", fill= "purple") +
+  labs(
+    title = "Diferencias entre resultados estimados por encuestas y resultados de elecciones",
+    x = "Elección",
+    y = "Error de las encuestas",
+    caption = "Pregunta 3"
+  )
+```
+
+## Error de encuestas en partidos de ámbito nacional {.smaller}
+
+Inicialmente las encuestas solían arrojar [resultados inferiores]{.red} a las votaciones reales, aunque con el paso de los años se han ido ajustando un poco más.
+
+```{r}
+#| echo: true
+#| code-fold: true
+encuestas_error_n <- ciudad_error|> 
+  left_join(encuestas) |> 
+  mutate(encuestas = voto_estim/100) |> 
+  select(fecha, partido_group, prop, encuestas) |> 
+  filter(partido_group %in% c("PSOE","PP", "VOX", "Cs", "MP", "UP", "IU", "PODEMOS"))
+
+encuestas_error_n |> 
+  ggplot() +
+  geom_boxplot(aes(x = partido_group, y = encuestas, fill= partido_group ), alpha = 0.9) +
+  geom_point(aes(x = partido_group, y = prop), color = "pink2", size = 3) +
+  scale_fill_manual(values = colores_partidos) +
+  facet_wrap(~fecha, scales = "free_y") +
+  coord_flip() +
+  labs(
+    title = "Error asociado a cada encuesta en el ámbito nacional",
+    x = "Partido político",
+    y = "Error de las encuestas",
+    fill = "Partido político",
+    caption = "En rosa la encuesta que no habría tenido error"
+  )
+
+```
+
+# 4. ¿Cómo analizar la relación entre censo y voto? ¿Es cierto que determinados partidos ganan en las zonas rurales? {.smaller}
+
+## Relación censo-voto por provincia {.smaller}
+
+Se aprecia que a mayor número de habitantes censado mayor número de votos.
+
+```{r}
+#| echo: true
+#| code-fold: true
+elecciones <- election_data
+elecciones <- elecciones |> 
+  mutate(eleccion = case_when(
+    eleccion == "Marzo de 2008" ~ as.Date("2008-03-09"),
+    eleccion == "Noviembre de 2011" ~ as.Date("2011-11-20"),
+    eleccion == "Diciembre de 2015" ~ as.Date("2015-12-20"),
+    eleccion == "Junio de 2016" ~ as.Date("2016-06-26"),
+    eleccion == "Abril de 2019" ~ as.Date("2019-04-28"),
+    eleccion == "Noviembre de 2019" ~ as.Date("2019-11-10"),
+    TRUE ~ as.Date(NA)
+  )) |> 
+  select(-c(anno, mes, codigo_distrito_electoral))
+# Asignar las Comunidades Autónomas según el código de provincia
+elecciones <- elecciones |> 
+  mutate(
+    CCAA = case_when(
+      prov_id %in% c("01", "20", "48") ~ "País Vasco",             # Álava, Guipúzcoa, Vizcaya
+      prov_id == "02" ~ "Castilla-La Mancha",                      # Albacete
+      prov_id == "03" ~ "Comunidad Valenciana",                    # Alicante
+      prov_id == "04" ~ "Andalucía",                               # Almería
+      prov_id == "05" ~ "Castilla y León",                         # Ávila
+      prov_id == "06" ~ "Extremadura",                             # Badajoz
+      prov_id == "07" ~ "Islas Baleares",                          # Islas Baleares
+      prov_id == "08" ~ "Cataluña",                                # Barcelona
+      prov_id == "09" ~ "Castilla y León",                         # Burgos
+      prov_id == "10" ~ "Extremadura",                             # Cáceres
+      prov_id == "11" ~ "Andalucía",                               # Cádiz
+      prov_id == "12" ~ "Comunidad Valenciana",                    # Castellón
+      prov_id == "13" ~ "Castilla-La Mancha",                      # Ciudad Real
+      prov_id == "14" ~ "Andalucía",                               # Córdoba
+      prov_id == "15" ~ "Galicia",                                 # A Coruña
+      prov_id == "16" ~ "Castilla-La Mancha",                      # Cuenca
+      prov_id == "17" ~ "Cataluña",                                # Girona
+      prov_id == "18" ~ "Andalucía",                               # Granada
+      prov_id == "19" ~ "Castilla-La Mancha",                      # Guadalajara
+      prov_id == "21" ~ "Andalucía",                               # Huelva
+      prov_id == "22" ~ "Aragón",                                  # Huesca
+      prov_id == "23" ~ "Andalucía",                               # Jaén
+      prov_id == "24" ~ "Castilla y León",                         # León
+      prov_id == "25" ~ "Cataluña",                                # Lleida
+      prov_id == "26" ~ "La Rioja",                                # La Rioja
+      prov_id == "27" ~ "Galicia",                                 # Lugo
+      prov_id == "28" ~ "Comunidad de Madrid",                     # Madrid
+      prov_id == "29" ~ "Andalucía",                               # Málaga
+      prov_id == "30" ~ "Región de Murcia",                        # Murcia
+      prov_id == "31" ~ "Navarra",                                 # Navarra
+      prov_id == "32" ~ "Galicia",                                 # Ourense
+      prov_id == "33" ~ "Asturias",                                # Asturias
+      prov_id == "34" ~ "Castilla y León",                         # Palencia
+      prov_id == "35" ~ "Canarias",                                # Las Palmas
+      prov_id == "36" ~ "Galicia",                                 # Pontevedra
+      prov_id == "37" ~ "Castilla y León",                         # Salamanca
+      prov_id == "38" ~ "Canarias",                                # Santa Cruz de Tenerife
+      prov_id == "39" ~ "Cantabria",                               # Cantabria
+      prov_id == "40" ~ "Castilla y León",                         # Segovia
+      prov_id == "41" ~ "Andalucía",                               # Sevilla
+      prov_id == "42" ~ "Castilla y León",                         # Soria
+      prov_id == "43" ~ "Cataluña",                                # Tarragona
+      prov_id == "44" ~ "Aragón",                                  # Teruel
+      prov_id == "45" ~ "Castilla-La Mancha",                      # Toledo
+      prov_id == "46" ~ "Comunidad Valenciana",                    # Valencia
+      prov_id == "47" ~ "Castilla y León",                         # Valladolid
+      prov_id == "49" ~ "Castilla y León",                         # Zamora
+      prov_id == "50" ~ "Aragón",                                  # Zaragoza
+      prov_id == "51" ~ "Ceuta",                                   # Ceuta
+      prov_id == "52" ~ "Melilla",                                 # Melilla
+      TRUE ~ NA_character_                                         # Para cualquier otro caso, asigna NA
+    )
+  )
+elecciones <- elecciones |> 
+  mutate(
+    provincia = case_when(
+      prov_id == "01" ~ "Álava",
+      prov_id == "02" ~ "Albacete",
+      prov_id == "03" ~ "Alicante",
+      prov_id == "04" ~ "Almería",
+      prov_id == "05" ~ "Ávila",
+      prov_id == "06" ~ "Badajoz",
+      prov_id == "07" ~ "Islas Baleares",
+      prov_id == "08" ~ "Barcelona",
+      prov_id == "09" ~ "Burgos",
+      prov_id == "10" ~ "Cáceres",
+      prov_id == "11" ~ "Cádiz",
+      prov_id == "12" ~ "Castellón",
+      prov_id == "13" ~ "Ciudad Real",
+      prov_id == "14" ~ "Córdoba",
+      prov_id == "15" ~ "A Coruña",
+      prov_id == "16" ~ "Cuenca",
+      prov_id == "17" ~ "Girona",
+      prov_id == "18" ~ "Granada",
+      prov_id == "19" ~ "Guadalajara",
+      prov_id == "20" ~ "Guipúzcoa",
+      prov_id == "21" ~ "Huelva",
+      prov_id == "22" ~ "Huesca",
+      prov_id == "23" ~ "Jaén",
+      prov_id == "24" ~ "León",
+      prov_id == "25" ~ "Lleida",
+      prov_id == "26" ~ "La Rioja",
+      prov_id == "27" ~ "Lugo",
+      prov_id == "28" ~ "Madrid",
+      prov_id == "29" ~ "Málaga",
+      prov_id == "30" ~ "Murcia",
+      prov_id == "31" ~ "Navarra",
+      prov_id == "32" ~ "Ourense",
+      prov_id == "33" ~ "Asturias",
+      prov_id == "34" ~ "Palencia",
+      prov_id == "35" ~ "Las Palmas",
+      prov_id == "36" ~ "Pontevedra",
+      prov_id == "37" ~ "Salamanca",
+      prov_id == "38" ~ "Santa Cruz de Tenerife",
+      prov_id == "39" ~ "Cantabria",
+      prov_id == "40" ~ "Segovia",
+      prov_id == "41" ~ "Sevilla",
+      prov_id == "42" ~ "Soria",
+      prov_id == "43" ~ "Tarragona",
+      prov_id == "44" ~ "Teruel",
+      prov_id == "45" ~ "Toledo",
+      prov_id == "46" ~ "Valencia",
+      prov_id == "47" ~ "Valladolid",
+      prov_id == "48" ~ "Vizcaya",
+      prov_id == "49" ~ "Zamora",
+      prov_id == "50" ~ "Zaragoza",
+      prov_id == "51" ~ "Ceuta",
+      prov_id == "52" ~ "Melilla",
+      TRUE ~ NA_character_
+    )
+  ) |> 
+  relocate(
+    c(provincia, CCAA), .after = municipio
+  )
+
+# censo total por provincia y elección
+censo_provincial <- elecciones |> 
+  group_by(provincia, eleccion) |> 
+  summarise(total_censo = sum(censo, na.rm = TRUE), .groups = 'drop')
+
+# votos totales por partido, provincia y elección
+votos_partido <- elecciones |> 
+  group_by(provincia, eleccion, partido_group) |> 
+  summarise(total_votos = sum(votos, na.rm = TRUE), .groups = 'drop')
+
+# partido más votado por provincia y elección
+partido_ganador <- votos_partido |> 
+  group_by(provincia, eleccion) |> 
+  slice_max(order_by = total_votos, n = 1, with_ties = FALSE) |> 
+  ungroup()
+
+# unir los datos de censo y partido ganador
+tabla_resumen <- partido_ganador |> 
+  inner_join(censo_provincial, by = c("provincia", "eleccion"))
+
+theme_update(legend.position = "right")
+
+# relación entre el censo provincial y el partido más votado
+prov_censo_voto1 <- ggplot(tabla_resumen, 
+                           aes(x = total_censo,
+                               y = total_votos,
+                               color = partido_group,
+                               text = provincia)) +
+  geom_point(alpha = 0.7) +
+  facet_wrap(~ eleccion, scales = "free_y") +
+  scale_color_manual(values = colores_partidos) +
+  labs(
+    title = "Relación Censo Provincial - Partido Más Votado",
+    x = "Censo",
+    y = "Votos",
+    color = "Partido"
+  ) +
+theme(
+    legend.key.size = unit(5, 'mm'),
+    axis.text.x = element_text(size = 6),
+    axis.text.y = element_text(size = 5))
+
+ggplotly(prov_censo_voto1, width = 1000, height = 500)
+```
+
+## Relación censo-voto por CCAA {.smaller}
+
+```{r}
+#| echo: true
+#| code-fold: true
+# censo total por CCAA y elección
+censo_CCAA <- elecciones |> 
+  group_by(CCAA, eleccion) |> 
+  summarise(total_censo = sum(censo, na.rm = TRUE), .groups = 'drop')
+
+# votos totales por partido, CCAA y elección
+votos_partido_CCAA <- elecciones |> 
+  group_by(CCAA, eleccion, partido_group) |> 
+  summarise(total_votos = sum(votos, na.rm = TRUE), .groups = 'drop')
+
+# partido más votado por CCAA y elección
+partido_ganador_CCAA <- votos_partido_CCAA |> 
+  group_by(CCAA, eleccion) |> 
+  slice_max(order_by = total_votos, n = 1, with_ties = FALSE) |> 
+  ungroup()
+
+# unir los datos de censo y partido ganador
+tabla_resumen_CCAA <- partido_ganador_CCAA |> 
+  inner_join(censo_CCAA, by = c("CCAA", "eleccion"))
+
+
+
+# relación entre el censo CCAA y el partido más votado
+CCAA_censo_voto1 <- ggplot(tabla_resumen_CCAA, 
+                           aes(x = total_censo,
+                               y = total_votos,
+                               color = partido_group,
+                               text = CCAA)) +
+  geom_point(alpha = 0.7) +
+  facet_wrap(~ eleccion, scales = "free_y") +
+  scale_color_manual(values = colores_partidos) +
+  labs(
+    title = "Relación Censo CCAA - Partido Más Votado",
+    x = "Censo",
+    y = "Votos",
+    color = "Partido"
+  ) +
+theme(
+    legend.key.size = unit(5, 'mm'),
+    axis.text.x = element_text(size = 6),
+    axis.text.y = element_text(size = 5))
+
+
+ggplotly(CCAA_censo_voto1, width = 1000, height = 500)
+```
+
+## Proporción de partido más votado por censo {.smaller}
+
+Se puede observar como la **mayoría** se disputa entre [PP y PSOE]{.green}, aunque van apareciendo más partidos.
+
+```{r}
+#| echo: true
+#| code-fold: true
+# Recategorizamos y factorizamos los tramos censales según INE
+elecciones <- elecciones |>
+  mutate(
+    categoria_censo_num = case_when(
+      censo > 500000 ~ ">500k",
+      censo > 200000 & censo <= 500000 ~ "200-500k",
+      censo > 100000 & censo <= 200000 ~ "100-200k",
+      censo > 50000 & censo <= 100000 ~ "50-100k ",
+      censo > 20000 & censo <= 50000 ~ "20-50k",
+      censo > 10000 & censo <= 20000 ~ "10-20k",
+      censo > 5000 & censo <= 10000 ~ "5-10k",
+      censo <= 5000 ~ "<5k",
+      TRUE ~ NA_character_  # Manejo de posibles valores NA en 'censo'
+    )
+  )
+
+# Definir el orden deseado de los niveles
+niveles_ordenados <- c("<5k", "5-10k", "10-20k", "20-50k", "50-100k", "100-200k", "200-500k", ">500k")
+
+# Convertir 'categoria_censo_num' en factor con niveles ordenados
+elecciones <- elecciones |>
+  mutate(
+    categoria_censo_num = factor(categoria_censo_num, levels = niveles_ordenados)
+  )
+
+elecciones <- elecciones |>
+  mutate(
+    categoria_censo_num = fct_relevel(categoria_censo_num, niveles_ordenados)
+  )
+
+
+#Exploramos los votos según municipios
+
+# Paso 1: Identificar el partido más votado por municipio y elección
+partido_mas_votado <- elecciones %>%
+  drop_na(categoria_censo_num) %>%
+  group_by(municipio, eleccion) %>%
+  slice_max(votos, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+# Paso 2: Contar la frecuencia de cada partido más votado por categoría de censo y elección
+frecuencia_partidos <- partido_mas_votado %>%
+  group_by(eleccion, categoria_censo_num, partido_group) %>%
+  summarise(frecuencia = n(), .groups = 'drop')
+
+# Paso 3: Calcular el porcentaje relativo dentro de cada combinación de elección y categoría de censo
+frecuencia_partidos <- frecuencia_partidos %>%
+  group_by(eleccion, categoria_censo_num) %>%
+  mutate(porcentaje = frecuencia / sum(frecuencia) * 100) %>%
+  ungroup()
+
+# Paso 4: Crear el gráfico de barras apiladas con porcentajes
+prop_apil_mun_censo <- ggplot(frecuencia_partidos, aes(x = categoria_censo_num, y = porcentaje, fill = partido_group)) +
+  geom_bar(stat = "identity", position = "fill") +
+  scale_fill_manual(values = colores_partidos) +
+  facet_wrap(~ eleccion) +
+  labs(x = "Categoría de censo",
+    y = "Proporción votos",
+    fill = "Partido"
+  ) +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 5),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank()
+  )
+
+ggplotly(prop_apil_mun_censo, width = 1000, height = 500)
+
+```
+
+## ¿Es cierto que determinados partidos ganan en las zonas rurales? {.smaller}
+
+```{r}
+#| echo: true
+#| code-fold: true
+# Unir datos de municipios y partidos
+election_todas <- election_data  |> 
+  left_join(cod_mun, by = c("cod_muni" = "cod_mun"))  |> 
+  left_join(abbrev, by = c("partido" = "denominacion"))
+
+
+# Revisar y manejar valores nulos
+election_todas <- election_todas  |> 
+  mutate(siglas = ifelse(is.na(siglas), "Otros", siglas))
+
+# Crear variable de participación total
+election_todas <- election_todas  |> 
+  mutate(participacion_total = participacion_1 + participacion_2)
+# Clasificación rural/urbano
+election_todas <- election_todas  |> 
+  mutate(zone_type = ifelse(censo < 5000, "Rural", "Urbano"))
+
+# Filtrar partidos relevantes
+partidos_relevantes <- c(BILDU, BNG, Cs, ERC, PNV, PODEMOS, PP, PSOE, VOX)
+datos_relevantes <- election_data |> 
+  filter(partido %in% partidos_relevantes)
+
+# Agregar columna para diferenciar rural y urbano
+datos_relevantes <- datos_relevantes |> 
+  mutate(tipo_zona = if_else(censo < 5000, "Rural", "Urbana"),
+         tipo_partido = if_else(partido %in% c(PP, Cs, VOX, PNV), "Derecha", "Izquierda"))
+
+# Resumir datos para calcular proporciones por orientación política
+pr3 <- datos_relevantes |> 
+  summarise(suma = sum(votos), .by = c(tipo_partido, tipo_zona, fecha)) |> 
+  mutate(prop = round(suma / sum(suma), 2), .by = c(fecha, tipo_zona))
+
+# Crear el gráfico
+pr3 |> 
+  mutate(tipo_partido = factor(tipo_partido, levels = c("Izquierda", "Derecha"))) |> 
+  ggplot(aes(x = fecha, y = prop, fill = tipo_partido)) +
+  geom_col(position = "fill") + 
+  geom_text(aes(label = scales::percent(prop, accuracy = 1)), color = "white", 
+            position = position_fill(0.5)) +
+  facet_wrap(~ tipo_zona) + 
+  scale_fill_manual(values = c("Izquierda" = "#c81d11", "Derecha" = "#005b8f")) +
+  theme(legend.position = "bottom") +
+  labs(
+    title = "Proporción de votos por zona e inclinación política",
+    subtitle = "Comparación entre partidos de izquierda y derecha",
+    x = "Fecha elección",
+    y = "Proporción de votos",
+    fill = "Inclinación"
+  )
+```
+
+# Pregunta adicional 1: Porcentaje de participación por provincia {.smaller}
+
+## Participación en las elecciones {.smaller}
+
+Destacan las elecciones de **marzo de 2008 y abril de 2019** por tener la [mayor participación]{.red}, y las elecciones de **junio de 2016** por ser la votación con [menor porcentaje de participación]{.red}.
+
+```{r}
+#| echo: true
+#| code-fold: true
+#Primero cargo los datos de elecciones y le quito la informacion de los partidos politicos. Elimino columnas que no hacen falta y nombro las elecciones, igual que hice al principio
+
+participacion <- read_csv(file = "./data/datos_elecciones_brutos.csv")
+#Selecciono solo las columnas que me interesan
+participacion <- participacion |> select(tipo_eleccion:votos_candidaturas)
+participacion <- participacion |> select(-c(tipo_eleccion,vuelta))
+#Creo una variable que cruce con municipios del mapa
+participacion <- participacion |> 
+  mutate(muni_graf = glue("{codigo_provincia}{codigo_municipio}"), 
+         prov_id = codigo_provincia,
+         .before = codigo_distrito_electoral)
+#Nombro las elecciones y las ordeno
+participacion <- participacion |>  
+  mutate(eleccion = glue("{mes} - {anno}")) |> 
+  mutate(eleccion = my(eleccion)) |> 
+  mutate(eleccion = glue("{month(eleccion)} - {year(eleccion)}")) |> 
+  relocate(eleccion, .before = anno)
+
+#Y ahora utilizo forcats para ordenar y renombrar
+participacion <- participacion |> mutate(eleccion = factor(eleccion,
+                                          levels = c("3 - 2008",
+                                                     "11 - 2011",
+                                                     "12 - 2015",
+                                                     "6 - 2016",
+                                                     "4 - 2019",
+                                                     "11 - 2019"),
+                                          ordered = TRUE,
+                                          labels = c("Marzo de 2008",
+                                                     "Noviembre de 2011",
+                                                     "Diciembre de 2015",
+                                                     "Junio de 2016",
+                                                     "Abril de 2019",
+                                                     "Noviembre de 2019")))
+#Elimino las columnas que no me interesan
+participacion <- participacion |> select(-c(anno, mes, codigo_provincia, codigo_municipio, codigo_distrito_electoral,
+                                         numero_mesas))
+
+#calculo la participacion relativa para cada municipio a las 14, 18 y 20
+#Cambio nombres de la participacion parcial
+participacion <- participacion |> rename(participacion_14 = participacion_1, participacion_18 = participacion_2)
+#Calculo la participacion absoluta en cada municipio
+participacion <- participacion |> rowwise() |> mutate (participacion_final = votos_blancos + votos_nulos + votos_candidaturas, .before = votos_blancos)
+#Calculo la participacion relativa en cada municicipio
+participacion <- participacion |> 
+  rowwise() |> 
+  mutate(rel_14 = participacion_14*100/censo,
+         rel_18 = participacion_18*100/censo,
+         rel_final = participacion_final*100/censo,
+         .before = votos_blancos)
+
+#Resumo las participaciones relativas de cada anno
+serie_temp <- participacion |> 
+  group_by(eleccion) |> 
+  summarise(primer_avance = sum(participacion_14)*100/sum(censo),
+            segundo_avance = sum(participacion_18)*100/sum(censo),
+            final = sum(participacion_final)*100/sum(censo))
+serie_temp <- serie_temp |> pivot_longer(cols = c(primer_avance, segundo_avance, final),
+                           values_to = "porcentaje",
+                           names_to = "momento")
+serie_temp <- serie_temp |>  mutate(momento = factor(momento,
+                                                     levels = c("primer_avance",
+                                                                "segundo_avance",
+                                                                "final"),
+                                                     labels = c("Primer avance",
+                                                                "Segundo avance",
+                                                                "Final"),
+                                                     ordered = TRUE))
+serie_temp |> 
+  ggplot( ) +
+  geom_line(aes(x = momento, 
+                y = porcentaje, 
+                color = eleccion, 
+                group = eleccion)) +
+  ggthemes::scale_color_colorblind() +
+  guides(size = "none") +
+  labs(title = "Participación en las elecciones",
+       color = "Elección",
+       y = "Porcentaje de participación",
+       x = "Momento de la jornada electoral")
+```
+
+## Participación en las elecciones rural vs urbano {.smaller}
+
+En un inicio la participación entre zonas rurales y urbanas, difería siendo ligeramente superior en las rurales, pero esto se ha ido disminuyendo hasta las últimas eleccciones en 2019 donde prácticamente no hay diferencia entre zonas.
+
+```{r}
+#| echo: true
+#| code-fold: true
+#Según censo (rural vs no) Corte en 5000
+
+participacion <- participacion |> mutate(rural = censo <= 5000)
+
+serie_temp <- participacion |> 
+  group_by(eleccion, rural) |> 
+  summarise(primer_avance = sum(participacion_14)*100/sum(censo),
+            segundo_avance = sum(participacion_18)*100/sum(censo),
+            final = sum(participacion_final)*100/sum(censo))
+
+serie_temp <- serie_temp |> pivot_longer(cols = c(primer_avance, segundo_avance, final),
+                           values_to = "porcentaje",
+                           names_to = "momento")
+serie_temp <- serie_temp |>  mutate(momento = factor(momento,
+                                                     levels = c("primer_avance",
+                                                                "segundo_avance",
+                                                                "final"),
+                                                     labels = c("Primer avance",
+                                                                "Segundo avance",
+                                                                "Final"),
+                                                     ordered = TRUE))
+serie_temp <- serie_temp |> mutate(rural = factor(rural,
+                                                  levels = c(TRUE, FALSE),
+                                                  labels = c("Rural", "Urbano")))
+```
+
+```{r}
+serie_temp |> 
+  ggplot( ) +
+  geom_line(aes(x = momento, 
+                y = porcentaje, 
+                color = rural, 
+                group = rural)) +
+  ggthemes::scale_color_colorblind() +
+  labs(title = "Participación en las elecciones",
+       subtitle = "Límite entre rural y urbano: censo de 5000 habitantes",
+       color = "Elección",
+       y = "Porcentaje de participación",
+       x = "Momento de la jornada electoral") +
+  facet_wrap("eleccion")
+```
+
+# Pregunta adicional 2: Bipartidismo
+
+## ¿Existe el bipartidismo? {.smaller}
+
+Vamos a representar el partido [ganador por provincia]{.purple}
+
+```{r}
+#| echo: true
+#| code-fold: true
+ganador_prov <- resumen_prov |> slice_max(resultado, by = c(eleccion, prov_id))
+prov_graf <-prov |> full_join(ganador_prov, by=c("prov_code" = "prov_id"))
+prov_graf <- prov_graf |> drop_na(eleccion)
+ggplot(prov_graf) +
+  geom_sf(color = "grey80", aes(fill = fct_infreq(partido_group))) +#Ordeno según el número de votos
+  scale_fill_manual(values = colores_partidos)+
+  labs(title = "Lista más votada por provincia y elección",
+       subtitle = "Partidos ordenados según el número de votos de las listas más votadas",
+       caption = "Pregunta adicional 1",
+       fill = "Lista más votada") +
+  facet_wrap(~eleccion)
+
+```
+
+## ¿Existe el bipartidismo? {.smaller}
+
+Se filtran los datos para calcular el porcentaje de cada partido y se codifican como partidos pertenecientes a la derecha o a la izquierda.
+
+```{r}
+#| echo: true
+#| code-fold: true
+#Primero miro en que provincias gana o pierde el bipartidismo
+#Suma PSOE y PP > 50%: gana. Lo contrario: pierde.
+#Calculo estas dos nuevas columnas por provincia
+porc_prov <- resumen_prov |> 
+  group_by(eleccion, prov_id, partido_group) |> 
+  summarise(porc_part = resultado*100/votos_candidaturas) |> 
+  ungroup()
+
+#Codifico cada partido como bipartidismo o perteniente a la derecha
+#Derecha: Cs, PNV, PP, VOX
+#Izquierda: BILDU, BNG, ERC, PODEMOS, PSOE
+bipart <- porc_prov |> 
+  mutate(bipart = partido_group %in% c("PP", "PSOE")) |> 
+  group_by(eleccion, prov_id, bipart) |> 
+  mutate(porc_bipart = sum(porc_part), .after = bipart) |> 
+  filter(bipart == TRUE) |> 
+  mutate(gana_bipart = (porc_bipart > 50)) |> 
+  ungroup()
+```
+
+En la gran mayoría de provincias gana el [bipartidismo]{.red}.
+
+```{r}
+#| echo: true
+#| code-fold: true
+#Uno con archivo de mapa
+bipart_graf <-prov |> full_join(bipart, by=c("prov_code" = "prov_id"))
+bipart_graf <- bipart_graf |> drop_na(eleccion)
+bipart_graf <- bipart_graf |> mutate(gana_bipart = factor(gana_bipart, levels = c(TRUE, FALSE), labels = c("Sí", "No"), ordered = TRUE))
+
+#Representacion dicotomica
+theme_update(theme(legend.position = "rigth"))
+ggplot(bipart_graf) +
+  geom_sf(color = "grey80", aes(fill = gana_bipart)) +#Ordeno según el número de votos
+  ggthemes::scale_fill_colorblind() +
+  labs(subtitle = "Provincias en las que gana el bipartidismo",
+       caption = "Pregunta adicional 2",
+       fill = "¿Gana el bipartidismo?") +
+  facet_wrap(~eleccion)
+```
+
+## Evolución del bipartidismo a lo largo de los años {.smaller}
+
+```{r}
+#| echo: true
+#| code-fold: true
+ggplot(bipart_graf) +
+  geom_sf(color = "grey80", aes(fill = porc_part)) +
+  scale_fill_gradient2(low = "red", 
+                        mid = "yellow",
+                        high = "green", 
+                        midpoint = 50) +
+  labs(subtitle = "Porcentaje de voto válido para PP o PSOE",
+       caption = "Pregunta adicional 2",
+       fill = "Porcentaje que suman PP y PSOE") +
+  facet_wrap(~eleccion)
+```
+
+## Evolución de los bloques izquierda/derecha {.smaller}
+
+Se codifican los partidos como pertenecientes a la derezha o izquierda. Se elimina "Otros" porque hay partidos mezclados.
+
+```{r}
+#| echo: true
+#| code-fold: true
+#Codifico cada partido como perteniente a la derecha o izda
+#Eliminio Otros, porque aquí hay mezclada izda y derecha
+#Derecha: Cs, PNV, PP, VOX
+#Izquierda: BILDU, BNG, ERC, PODEMOS, PSOE
+izda_dcha <- porc_prov |> 
+  filter(partido_group != "Otros") |> #Eliminio Otros, porque aquí hay mezclada izda y derecha
+    mutate(dcha = partido_group %in% c("Cs", "PNV", "PP", "VOX")) |> 
+  group_by(eleccion, prov_id, dcha) |> 
+  summarise(voto_derecha = sum(porc_part)) |> 
+  ungroup() |> 
+  pivot_wider(names_from = dcha, values_from = voto_derecha) |> 
+  rename(izda = "FALSE", dcha= "TRUE") |> 
+  rowwise() |> 
+  mutate(ventaja_izda = izda - dcha)
+
+#Uno con archivo de mapa
+izda_dcha_graf <-prov |> full_join(izda_dcha, by=c("prov_code" = "prov_id"))
+izda_dcha_graf <- izda_dcha_graf |> drop_na(eleccion)
+
+```
+
+En el **centro de la península** predomina más los partidos de [derechas]{.green}, mientras que en el **sur y nordeste** predominan los de [izquierda]{.green}.
+
+```{r}
+#| echo: true
+#| code-fold: true
+ggplot(izda_dcha_graf) +
+  geom_sf(color = "grey80", aes(fill = ventaja_izda)) +
+  scale_fill_gradient2(low = "darkblue", 
+                        mid = "white",
+                        high = "#c81d11", 
+                        midpoint = 0) +
+  labs(subtitle = "Puntos porcentuales de ventaja de la izquierda (BILDU, BNG, ERC, PODEMOS, PSOE) sobre la derecha (Cs, PNV, PP, VOX)",
+       caption = "Pregunta adicional 2",
+       fill = "Puntos porcentuales de ventaja de la izquierda") +
+  facet_wrap(~eleccion)
+```
+
+# Pregunta adicional 3: distribución de escaños
+
+## 2008 vs 2019 {.smaller}
+
+Se explora el paquete `{ggparliament}` con la función `parliament_data()` para la obtención del gráfico de escaños.
+
+::: columns
+::: {.column width="50%"}
+```{r}
+#| echo: true
+#| code-fold: true
+election_data$fecha <- glue("{election_data$anno}-{election_data$mes}")
+# Primero, asegúrate de que la columna 'fecha' esté en formato de fecha:
+#election_data$fecha <- as.Date(election_data$fecha, format = "%Y-%m")
+
+
+# Función para asignar siglas de partidos políticos
+asignar_siglas_color <- function(datos) {
+  datos <- datos  |> 
+    mutate(partido_siglas = case_when(
+      str_detect(str_to_lower(partido), ".*part.*popul|pp") ~ "PP",  
+      str_detect(str_to_lower(partido), "^part.*socialist|^socialist.*teruel") ~ "PSOE",
+      str_detect(str_to_lower(partido), "^ciudadanos.*partido|^ciutadans") ~ "C's",
+      str_detect(str_to_lower(partido), "vasco") ~ "PNV",
+      str_detect(str_to_lower(partido), "galego") ~ "BNG",
+      str_detect(str_to_lower(partido), "comprom") & !str_detect(partido, "^0-9") ~ "COMPROMÍS", # para evitar COMPROMÍS 2
+      str_detect(str_to_lower(partido), "^conver.*uni|^conver.*cata") ~ "CiU",
+      str_detect(str_to_upper(partido), "VERDES|PODEM|EZKER|COMUNISTA|ZQUIERDA REPUBLICANA|VERDS|IZQUIERDA UNIDA|EN MAREA|UNIDAD POPULAR|EQUO") & 
+        !str_detect(str_to_upper(stringi::stri_trans_general(partido, id = "Latin-ASCII")), "MAS PAIS") ~ "UP",
+      partido == "IU" ~ "UP",
+      str_detect(str_to_lower(partido), "erc") | str_detect(tolower(partido), "esquerra republicana") ~ "ERC",
+      str_detect(str_to_upper(partido), "EH|EUSKO|ARALAR") ~ "EH - BILDU",
+      str_detect(str_to_upper(stringi::stri_trans_general(partido, id = "Latin-ASCII")), "MAS PAIS") ~ "MÁS PAÍS",
+      str_detect(str_to_upper(partido), "VOX") ~ "VOX",
+      TRUE ~ "Otros"
+    )) |> 
+    # Crear la columna color_politico
+    mutate(color_politico = case_when(
+      partido_siglas == "PP" ~ "#3399FF",
+      partido_siglas == "PSOE" ~ "red",
+      partido_siglas == "C's" ~ "#FF5824",
+      partido_siglas == "PNV" ~ "#008135",
+      partido_siglas == "BNG" ~ "#76b3dd",
+      partido_siglas == "COMPROMÍS" ~ "#de6c25",
+      partido_siglas == "CiU" ~ "#F6350B",
+      partido_siglas == "UP" ~ "#6D50B3",
+      partido_siglas == "ERC" ~ "#ffbf41",
+      partido_siglas == "EH - BILDU" ~ "#00bda1",
+      partido_siglas == "MÁS PAÍS" ~ "#E61455",
+      partido_siglas == "VOX" ~ "#73B446",
+      TRUE ~ "#462B25"
+    ))
+  
+  return(datos)
+}
+# Llamada a la función
+election_data <- asignar_siglas_color(election_data)
+
+
+# PLOT 1
+
+# Filtra los datos para obtener solo la fecha más temprana:
+parlamento1 <- election_data  |> 
+  filter(fecha == min(fecha))  |> 
+  group_by(fecha, partido, partido_group)  |> 
+  summarise(votos = sum(votos))  |> 
+  ungroup()
+
+# Calcula los asientos basados en los votos:
+parlamento1 <- parlamento1  |> 
+  mutate(asientos = round(350 * votos / sum(votos)))  |> 
+  select(-votos)
+
+
+# Crea el gráfico de tipo semicírculo con ggparliament:
+distr_asientos1 <- ggparliament::parliament_data(election_data = parlamento1,
+                              type = "semicircle",      # Tipo de parlamento
+                              parl_rows = 7,            # Número de filas del parlamento
+                              party_seats = parlamento1$asientos)  # Asientos por partido
+
+
+distr_asientos1_siglas_color <- asignar_siglas_color(distr_asientos1)
+
+# Ahora, crea el gráfico:
+plot_distribucion1 <- ggplot(distr_asientos1_siglas_color, 
+                aes(x = x, y = y, color = partido_siglas)) +
+  geom_parliament_seats() + 
+  theme_ggparliament() +
+  labs(title = "Elecciones de 2008", x = "", y = "", color = "Partido") +
+  scale_colour_manual(values = distr_asientos1_siglas_color$color_politico, 
+                      limits = distr_asientos1_siglas_color$partido_siglas) 
+plot_distribucion1
+
+```
+:::
+
+::: {.column width="50%"}
+```{r}
+#| echo: true
+#| code-fold: true
+##### DIBUJO 2
+
+# Filtra los datos para obtener solo la fecha más temprana:
+parlamento2 <- election_data  |> 
+  filter(fecha == max(fecha))  |> 
+  group_by(fecha, partido, partido_group)  |> 
+  summarise(votos = sum(votos))  |> 
+  ungroup()
+
+# Calcula los asientos basados en los votos:
+parlamento2 <- parlamento2  |> 
+  mutate(asientos = round(350 * votos / sum(votos)))  |> 
+  select(-votos)
+
+#library(ggparliament)
+# Crea el gráfico de tipo semicírculo con ggparliament:
+distr_asientos2 <- parliament_data(election_data = parlamento2,
+                              type = "semicircle",      # Tipo de parlamento
+                              parl_rows = 7,            # Número de filas del parlamento
+                              party_seats = parlamento2$asientos)  # Asientos por partido
+
+
+distr_asientos2_siglas_color <- asignar_siglas_color(distr_asientos2)
+
+# Ahora, crea el gráfico:
+plot_distribucion2 <- ggplot(distr_asientos2_siglas_color, 
+                             aes(x = x, y = y, color = partido_siglas)) +
+  geom_parliament_seats() + 
+  theme_ggparliament() +
+  labs(title = "Elecciones de 2019", x = "", y = "", color = "Partido") +
+  scale_colour_manual(values = distr_asientos2_siglas_color$color_politico, 
+                      limits = distr_asientos2_siglas_color$partido_siglas)
+#theme(legend.position = "none")
+
+# Muestra el gráfico
+plot_distribucion2
+
+
+```
+:::
+:::
+
+# Pregunta adicional 4: ¿Existen diferencias significativas entre encuestadores a la hora de estimar los votos? {.smaller}
+
+## Encuestas según encuestador
+
+```{r}
+#| echo: true
+#| code-fold: true
+# Paso 1: Calcular el porcentaje de votos por partido para cada combinación de elección y encuestador
+votos_porcentajes <- encuestas |>
+  group_by(date_elec, pollster, partido) |>
+  summarise(voto_total = sum(voto_estim, na.rm = TRUE)) |>
+  mutate(porcentaje = voto_total / sum(voto_total) * 100) |>
+  ungroup()
+
+# Paso 2: Crear el gráfico de barras apiladas con facetas por elección y etiquetas truncadas
+fwer <- ggplot(votos_porcentajes, aes(x = pollster, y = porcentaje, fill = partido)) +
+  geom_bar(stat = "identity") +
+  geom_smooth(size = 6) +
+  scale_fill_manual(values = c(
+    "Cs" = "#fb5000",    
+    "OTROS" = "lightgray", 
+    "PODEMOS" = "#9269f5",  
+    "PP" = "#0562bd",       
+    "PSOE" = "#e30613",      
+    "PNV" = "#2a8343",
+    "VOX" = "#79ba2a",
+    "BNG" = "#8dd8f8",
+    "ERC" = "#ffbf41",
+    "BILDU" = "#03cfb5"
+  )) +
+  labs(
+    title = "Estimación de voto según encuestador",
+    x = "Encuestador",
+    y = "Votos",
+    fill = "Partido"
+  ) +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  scale_x_discrete(labels = function(x) strtrim(x, 5)) +  # Truncar etiquetas a las primeras 5 letras
+  facet_wrap(~ date_elec) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    plot.margin = margin(10, 30, 10, 10),
+    axis.text.y = element_text(size = 5),  # Reducir tamaño de las etiquetas del eje Y
+    strip.text = element_text(size = 5),  # Reducir tamaño de los títulos de las facetas
+    legend.title = element_text(size = 8), # Tamaño del título de la leyenda
+    legend.text = element_text(size = 6),  # Tamaño del texto de la leyenda
+  )
+
+ggplotly(fwer, width = 1000, height = 500)
+```
+
+# Conclusiones
+
+## Conclusiones
+
+-   En las elecciones al Congreso de España de 2008 a 2019, en los municipios con más de **100.000 habitantes** el partido ganador es el PP, seguido por el PSOE, lo que muestra que el [bipartidismo]{.red} sigue teniendo un evidente peso electoral en las ciudades grandes.
+
+-   En **2015** se destaca la participación de [PODEMOS]{.red} en las elecciones, cuando el liderazgo se mantiene generalmente entre PP y PSOE, lo que sugiere que puede haber una tendencia a nuevos movimientos políticos.
+
+-   La estimación de [**encuestas tiene un patrón de mejora según la evaluación de los últimos años**]{.red}, acercándose cada vez más a la realidad de los resultados electorales.
+
+-   Se observa en las **zonas rurales** predominio en las votaciones por los [partidos tradicionales]{.red} y una marcada polarización política.
+
+## Conclusiones
+
+-   Se observa un [**aumento en la participación de elecciones**]{.red} a medida que **avanza la jornada electoral**, lo que sugiere que, al acercarse al final, más personas deciden votar.
+
+-   Se observa en el **centro de la península** predominio por [partidos políticos de derecha]{.red} como PP y Vox, mientras que en el **sur y nordeste** (principalmente en el País Vasco, Cataluña y Andalucía) predominan los [partidos de izquierda]{.red}.
+
+-   El **bipartidismo** ha sido muy marcado en años anteriores, pero en las últimas elecciones se esta [viendo reducido]{.red} con la ganancia de votos de otros partidos.
+
+-   En cuanto a la **participación a la hora de votar**, se ha visto que el [**porcentaje de votantes no difiere**]{.red} en los últimos años en cuanto a [zona]{.red} rural y urbana.
+
+# Gracias por su atención
